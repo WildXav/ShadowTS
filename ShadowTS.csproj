@@ -1,0 +1,27 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>AnyCPU</Platforms>
+    <AlgoType>Strategy</AlgoType>
+    <AssemblyName>ShadowTS</AssemblyName>
+    <RootNamespace>ShadowTS</RootNamespace>
+    <StartAction>Program</StartAction>
+    <StartProgram>C:\Users\lowkey\Quantower\TradingPlatform\v1.138.15\Console.StarterNew.exe</StartProgram>
+    <StartArguments>--address 127.0.0.1 --port 54789</StartArguments>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <OutputPath>C:\Users\lowkey\Quantower\TradingPlatform\v1.138.15\..\..\Settings\Scripts\Strategies\ShadowTS</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <OutputPath>C:\Users\lowkey\Quantower\TradingPlatform\v1.138.15\..\..\Settings\Scripts\Strategies\ShadowTS</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>C:\Users\lowkey\Quantower\TradingPlatform\v1.138.15\bin\TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
