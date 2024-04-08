@@ -101,6 +101,7 @@ namespace ShadowTS
                 this.ActivePositions.Remove(sp);
 
                 sp.IncreaseElapsedBar();
+                // TODO: Send the order to the platform *after* having cancelled any active stop order for that position. Make ShieldedPosition.UpdateStop place the order.
                 var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
                 {
                     Account = this.Account,
