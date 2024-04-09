@@ -6,26 +6,18 @@ using TradingPlatform.BusinessLayer;
 
 namespace ShadowTS
 {
-    public struct ShieldedPosition(Position position)
+    public class ShieldedPosition(Position position)
     {
         public string Id = position.Id;
         public Position Position = position;
-        public int ElapsedBar { get; private set; } = 0;
-        public Order StopOrder { get; private set; }
+        public int ElapsedBar { get; set; } = 0;
+        public string StopOrderId { get; set; } = null;
 
-        public void IncreaseElapsedBar() => ++this.ElapsedBar;
-        public void UpdateStop(Order stopOrder)
-        {
-            this.Position.StopLoss?.Cancel();
-            this.StopOrder?.Cancel();
-            this.StopOrder = stopOrder;
-        }
+        public override string ToString() => $"ElapsedBar = {this.ElapsedBar}. {this.Position}";
 
-        public override readonly string ToString() => $"ElapsedBar = {this.ElapsedBar}. {this.Position}";
+        public override int GetHashCode() => HashCode.Combine(this.Id);
 
-        public override readonly int GetHashCode() => HashCode.Combine(this.Id);
-
-        public override readonly bool Equals(object obj) => obj is ShieldedPosition sp && this.Id == sp.Id;
+        public override bool Equals(object obj) => obj is ShieldedPosition sp && this.Id == sp.Id;
 
         public static bool operator ==(ShieldedPosition left, ShieldedPosition right) => left.Equals(right);
 
@@ -34,9 +26,6 @@ namespace ShadowTS
 
     public class ShadowTS : Strategy
     {
-        [InputParameter("Account")]
-        public Account Account;
-
         [InputParameter("Symbol")]
         public Symbol Symbol;
 
@@ -57,13 +46,6 @@ namespace ShadowTS
 
         protected override void OnRun()
         {
-            if (this.Account == null)
-            {
-                this.LogError("Account is null");
-                this.Stop();
-                return;
-            }
-
             if (this.Symbol == null)
             {
                 this.LogError("Symbol is null");
@@ -71,6 +53,7 @@ namespace ShadowTS
                 return;
             }
 
+            this.ActivePositions.Clear();
             Core.PositionAdded += this.Core_PositionAdded;
             Core.PositionRemoved += this.Core_PositionRemoved;
 
@@ -90,35 +73,46 @@ namespace ShadowTS
             }
         }
 
+        [Obsolete]
+        protected override List<StrategyMetric> OnGetMetrics()
+        {
+            List<StrategyMetric> result = base.OnGetMetrics();
+            result.Add(new StrategyMetric() { Name = "Positions Count", FormattedValue = this.ActivePositions.Count.ToString() });
+            return result;
+        }
+
         private void HistoricalData_NewHistoryItem(object sender, HistoryEventArgs e)
         {
-            var lastBar = (HistoryItemBar)this.Symbol.GetHistory(this.Period, Core.TimeUtils.DateTimeUtcNow.Subtract(this.Period.Duration))[1];
+            DateTime from = Core.TimeUtils.DateTimeUtcNow.Subtract(this.Period.Duration);
+            var lastBar = this.Symbol.GetHistory(this.Period, from).Cast<HistoryItemBar>().FirstOrDefault(bar => bar.TimeRight < Core.TimeUtils.DateTimeUtcNow) ?? null;
+
+            if (lastBar == null) {
+                this.LogError("Failed to find completed bar");
+                return;
+            };
 
             this.Log($"New \"{this.Period}\" candle -- {lastBar}");
 
             foreach (var sp in this.ActivePositions)
             {
-                this.ActivePositions.Remove(sp);
-
-                sp.IncreaseElapsedBar();
-                // TODO: Send the order to the platform *after* having cancelled any active stop order for that position. Make ShieldedPosition.UpdateStop place the order.
+                ++sp.ElapsedBar;
+                CancelStopOrder(sp);
                 var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
                 {
-                    Account = this.Account,
-                    Symbol = this.Symbol,
+                    Account = sp.Position.Account,
+                    Symbol = sp.Position.Symbol,
                     PositionId = sp.Id,
                     Side = sp.Position.Side == Side.Buy ? Side.Sell : Side.Buy,
-                    Price = sp.Position.Side == Side.Buy ? lastBar.Low : lastBar.High,
+                    TriggerPrice = sp.Position.Side == Side.Buy ? lastBar.Low : lastBar.High,
                     TimeInForce = TimeInForce.GTC,
                     Quantity = sp.Position.Quantity,
                     OrderTypeId = OrderType.Stop,
                 });
                 if (result.Status == TradingOperationResultStatus.Success)
                 {
-                    sp.UpdateStop(Core.Instance.GetOrderById(result.OrderId));
-                    this.ActivePositions.Add(sp);
-                    this.Log($"{sp}");
-                } else
+                    sp.StopOrderId = result.OrderId;
+                }
+                else
                 {
                     sp.Position.Close();
                     this.LogError("Unable to set stop loss. Position closed");
@@ -128,22 +122,31 @@ namespace ShadowTS
 
         private void Core_PositionAdded(Position position)
         {
-            if (!this.ActivePositions.Where(sp => sp.Id == position.Id).Any())
+            if (this.ActivePositions.Add(new ShieldedPosition(position)))
             {
-                this.Log($"Adding position -- ID: {position.Id}, Side: {position.Side}");
+                this.Log($"Added position -- ID: {position.Id}, Side: {position.Side}. ActivePos Count: {this.ActivePositions.Count}");
             }
-
-            this.ActivePositions.Add(new ShieldedPosition(position));
         }
 
         private void Core_PositionRemoved(Position position)
         {
-            if (this.ActivePositions.Where(sp => sp.Id == position.Id).Any())
+            this.Log($"Trying to remove {position.Id}");
+            var sp = this.ActivePositions.FirstOrDefault(sp => sp.Id.Equals(position.Id)) ?? null;
+            if (sp == null) return;
+            CancelStopOrder(sp);
+            if (this.ActivePositions.Remove(sp))
             {
-                this.Log($"Removing position -- ID: {position.Id}, Side: {position.Side}");
+                this.Log($"Removed position -- ID: {sp.Id}, Side: {sp.Position.Side}. ActivePos Count: {this.ActivePositions.Count}");
             }
+        }
 
-            this.ActivePositions.RemoveWhere(sp => sp.Id == position.Id);
+        private static void CancelStopOrder(ShieldedPosition sp)
+        {
+            if (sp.StopOrderId == null) return;
+            try {
+                Core.CancelOrder(Core.GetOrderById(sp.StopOrderId, sp.Position.ConnectionId));
+            } catch (Exception) { }
+            sp.StopOrderId = null;
         }
     }
 }
