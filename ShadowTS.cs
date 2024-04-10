@@ -10,8 +10,9 @@ namespace ShadowTS
     {
         public string Id = position.Id;
         public Position Position = position;
-        public int ElapsedBar { get; set; } = 0;
-        public string StopOrderId { get; set; } = null;
+        public int ElapsedBar = 0;
+        public string StopOrderId = null;
+        public Queue<double> NextStops = new();
 
         public override string ToString() => $"ElapsedBar = {this.ElapsedBar}. {this.Position}";
 
@@ -33,10 +34,10 @@ namespace ShadowTS
         public Period Period = Period.HOUR4;
 
         [InputParameter("Trailing Stop Bar Lag")]
-        public int barLag = 2;
+        public int BarLag = 2;
 
         private HistoricalData HistoricalData;
-        private readonly HashSet<ShieldedPosition> ActivePositions = [];
+        private readonly HashSet<ShieldedPosition> WatchedPositions = [];
 
         public ShadowTS() : base()
         {
@@ -53,7 +54,7 @@ namespace ShadowTS
                 return;
             }
 
-            this.ActivePositions.Clear();
+            this.WatchedPositions.Clear();
             Core.PositionAdded += this.Core_PositionAdded;
             Core.PositionRemoved += this.Core_PositionRemoved;
 
@@ -77,7 +78,10 @@ namespace ShadowTS
         protected override List<StrategyMetric> OnGetMetrics()
         {
             List<StrategyMetric> result = base.OnGetMetrics();
-            result.Add(new StrategyMetric() { Name = "Positions Count", FormattedValue = this.ActivePositions.Count.ToString() });
+            result.Add(new StrategyMetric() { Name = "Symbol", FormattedValue = this.Symbol.ToString() });
+            result.Add(new StrategyMetric() { Name = "Period", FormattedValue = this.Period.ToString() });
+            result.Add(new StrategyMetric() { Name = "Bar Lag", FormattedValue = this.BarLag.ToString() });
+            result.Add(new StrategyMetric() { Name = "Watched Positions", FormattedValue = this.WatchedPositions.Count.ToString() });
             return result;
         }
 
@@ -93,8 +97,18 @@ namespace ShadowTS
 
             this.Log($"New \"{this.Period}\" candle -- {lastBar}");
 
-            foreach (var sp in this.ActivePositions)
+            foreach (var sp in this.WatchedPositions)
             {
+                while (sp.NextStops.Count < this.BarLag)
+                {
+                    var nextStop = sp.Position.Side == Side.Buy ? lastBar.Low : lastBar.High;
+                    if (sp.NextStops.Count > 0)
+                    {
+                        nextStop = sp.Position.Side == Side.Buy ? Math.Max(lastBar.Low, sp.NextStops.Last()) : Math.Min(lastBar.High, sp.NextStops.Last());
+                    }
+                    sp.NextStops.Enqueue(nextStop);
+                }
+
                 ++sp.ElapsedBar;
                 CancelStopOrder(sp);
                 var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
@@ -103,7 +117,7 @@ namespace ShadowTS
                     Symbol = sp.Position.Symbol,
                     PositionId = sp.Id,
                     Side = sp.Position.Side == Side.Buy ? Side.Sell : Side.Buy,
-                    TriggerPrice = sp.Position.Side == Side.Buy ? lastBar.Low : lastBar.High,
+                    TriggerPrice = sp.NextStops.Dequeue(),
                     TimeInForce = TimeInForce.GTC,
                     Quantity = sp.Position.Quantity,
                     OrderTypeId = OrderType.Stop,
@@ -122,21 +136,28 @@ namespace ShadowTS
 
         private void Core_PositionAdded(Position position)
         {
-            if (this.ActivePositions.Add(new ShieldedPosition(position)))
+            var sp = new ShieldedPosition(position);
+            var desiredStopSide = position.Side == Side.Buy ? Side.Sell : Side.Buy;
+            sp.StopOrderId = Core.Orders
+                    .Where(order => order.Symbol.Equals(position.Symbol) && order.OrderTypeId == OrderType.Stop && order.Side == desiredStopSide)
+                    .Select(order => order.Id)
+                    .FirstOrDefault() ?? null;
+
+            if (this.WatchedPositions.Add(sp))
             {
-                this.Log($"Added position -- ID: {position.Id}, Side: {position.Side}. ActivePos Count: {this.ActivePositions.Count}");
+                this.Log($"Added position -- ID: {sp.Id}, Side: {sp.Position.Side}, Stop: {sp.StopOrderId ?? "None"}");
             }
         }
 
         private void Core_PositionRemoved(Position position)
         {
             this.Log($"Trying to remove {position.Id}");
-            var sp = this.ActivePositions.FirstOrDefault(sp => sp.Id.Equals(position.Id)) ?? null;
+            var sp = this.WatchedPositions.FirstOrDefault(sp => sp.Id.Equals(position.Id)) ?? null;
             if (sp == null) return;
             CancelStopOrder(sp);
-            if (this.ActivePositions.Remove(sp))
+            if (this.WatchedPositions.Remove(sp))
             {
-                this.Log($"Removed position -- ID: {sp.Id}, Side: {sp.Position.Side}. ActivePos Count: {this.ActivePositions.Count}");
+                this.Log($"Removed position -- ID: {sp.Id}, Side: {sp.Position.Side}");
             }
         }
 
