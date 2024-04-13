@@ -1,28 +1,29 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using TradingPlatform.BusinessLayer;
 
 namespace ShadowTS
 {
-    public class ShieldedPosition(Position position)
+    public class WatchedPosition(Position position)
     {
         public string Id = position.Id;
-        public Position Position = position;
-        public int ElapsedBar = 0;
+        public Position Data = position;
         public string StopOrderId = null;
         public Queue<double> NextStops = new();
+        public bool IsLong = position.Side == Side.Buy;
+        public bool IsShort = position.Side == Side.Sell;
+        public Side StopSide = position.Side == Side.Buy ? Side.Sell : Side.Buy;
 
-        public override string ToString() => $"ElapsedBar = {this.ElapsedBar}. {this.Position}";
+        public override string ToString() => $"Id = {this.Id}, StopId = {this.StopOrderId}, NextStops = {this.NextStops}, Data = {this.Data}";
 
         public override int GetHashCode() => HashCode.Combine(this.Id);
 
-        public override bool Equals(object obj) => obj is ShieldedPosition sp && this.Id == sp.Id;
+        public override bool Equals(object obj) => obj is WatchedPosition sp && this.Id == sp.Id;
 
-        public static bool operator ==(ShieldedPosition left, ShieldedPosition right) => left.Equals(right);
+        public static bool operator ==(WatchedPosition left, WatchedPosition right) => left.Equals(right);
 
-        public static bool operator !=(ShieldedPosition left, ShieldedPosition right) => !(left == right);
+        public static bool operator !=(WatchedPosition left, WatchedPosition right) => !(left == right);
     }
 
     public class ShadowTS : Strategy
@@ -31,13 +32,13 @@ namespace ShadowTS
         public Symbol Symbol;
 
         [InputParameter("Trailing Stop Period")]
-        public Period Period = Period.HOUR4;
+        public Period Period = Period.MIN1;
 
         [InputParameter("Trailing Stop Bar Lag")]
         public int BarLag = 2;
 
         private HistoricalData HistoricalData;
-        private readonly HashSet<ShieldedPosition> WatchedPositions = [];
+        private WatchedPosition Position = null;
 
         public ShadowTS() : base()
         {
@@ -54,7 +55,7 @@ namespace ShadowTS
                 return;
             }
 
-            this.WatchedPositions.Clear();
+            this.Position = null;
             Core.PositionAdded += this.Core_PositionAdded;
             Core.PositionRemoved += this.Core_PositionRemoved;
 
@@ -64,11 +65,10 @@ namespace ShadowTS
 
         protected override void OnStop()
         {
+            Core.PositionAdded -= this.Core_PositionAdded;
+            Core.PositionRemoved -= this.Core_PositionRemoved;
             if (this.HistoricalData != null)
             {
-                Core.PositionAdded -= this.Core_PositionAdded;
-                Core.PositionRemoved -= this.Core_PositionRemoved;
-
                 this.HistoricalData.NewHistoryItem -= this.HistoricalData_NewHistoryItem;
                 this.HistoricalData.Dispose();
             }
@@ -81,93 +81,101 @@ namespace ShadowTS
             result.Add(new StrategyMetric() { Name = "Symbol", FormattedValue = this.Symbol.ToString() });
             result.Add(new StrategyMetric() { Name = "Period", FormattedValue = this.Period.ToString() });
             result.Add(new StrategyMetric() { Name = "Bar Lag", FormattedValue = this.BarLag.ToString() });
-            result.Add(new StrategyMetric() { Name = "Watched Positions", FormattedValue = this.WatchedPositions.Count.ToString() });
             return result;
         }
 
         private void HistoricalData_NewHistoryItem(object sender, HistoryEventArgs e)
         {
-            DateTime from = Core.TimeUtils.DateTimeUtcNow.Subtract(this.Period.Duration);
-            var lastBar = this.Symbol.GetHistory(this.Period, from).Cast<HistoryItemBar>().FirstOrDefault(bar => bar.TimeRight < Core.TimeUtils.DateTimeUtcNow) ?? null;
+            var now = Core.TimeUtils.DateTimeUtcNow;
+            var from = now.Subtract(this.Period.Duration);
+            var bars = this.Symbol.GetHistory(this.Period, from).Cast<HistoryItemBar>();
+            var lastBar = bars.LastOrDefault(bar => bar.TimeLeft >= from.Subtract(TimeSpan.FromSeconds(5)) && bar.TimeRight <= now.AddSeconds(5)) ?? null;
 
             if (lastBar == null) {
                 this.LogError("Failed to find completed bar");
                 return;
             };
-
             this.Log($"New \"{this.Period}\" candle -- {lastBar}");
 
-            foreach (var sp in this.WatchedPositions)
-            {
-                while (sp.NextStops.Count < this.BarLag)
-                {
-                    var nextStop = sp.Position.Side == Side.Buy ? lastBar.Low : lastBar.High;
-                    if (sp.NextStops.Count > 0)
-                    {
-                        nextStop = sp.Position.Side == Side.Buy ? Math.Max(lastBar.Low, sp.NextStops.Last()) : Math.Min(lastBar.High, sp.NextStops.Last());
-                    }
-                    sp.NextStops.Enqueue(nextStop);
-                }
+            if (this.Position == null) return;
+            double nextStop;
+            Order existingStopOrder = null;
 
-                ++sp.ElapsedBar;
-                CancelStopOrder(sp);
+            if (this.Position.StopOrderId == null)
+            {
+                existingStopOrder = this.GetExistingStopOrder();
+                existingStopOrder?.Cancel();
+            }
+
+            while (this.Position.NextStops.Count < this.BarLag)
+            {
+                nextStop = this.Position.IsLong ? lastBar.Low : lastBar.High;
+                if (this.Position.NextStops.Count > 0)
+                {
+                    double altPrice = existingStopOrder != null ? existingStopOrder.TriggerPrice : this.Position.NextStops.Last();
+                    nextStop = this.Position.IsLong ? Math.Max(lastBar.Low, altPrice) : Math.Min(lastBar.High, altPrice);
+                }
+                this.Position.NextStops.Enqueue(nextStop);
+            }
+
+            CancelStopOrder(this.Position);
+
+            nextStop = this.Position.NextStops.Dequeue();
+
+            if ((this.Position.IsLong && nextStop < lastBar.Close) || (this.Position.IsShort && nextStop > lastBar.Close))
+            {
                 var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
                 {
-                    Account = sp.Position.Account,
-                    Symbol = sp.Position.Symbol,
-                    PositionId = sp.Id,
-                    Side = sp.Position.Side == Side.Buy ? Side.Sell : Side.Buy,
-                    TriggerPrice = sp.NextStops.Dequeue(),
+                    Account = this.Position.Data.Account,
+                    Symbol = this.Position.Data.Symbol,
+                    PositionId = this.Position.Id,
+                    Side = this.Position.StopSide,
+                    TriggerPrice = nextStop,
                     TimeInForce = TimeInForce.GTC,
-                    Quantity = sp.Position.Quantity,
+                    Quantity = this.Position.Data.Quantity,
                     OrderTypeId = OrderType.Stop,
                 });
                 if (result.Status == TradingOperationResultStatus.Success)
                 {
-                    sp.StopOrderId = result.OrderId;
+                    this.Position.StopOrderId = result.OrderId;
+                    return;
                 }
-                else
-                {
-                    sp.Position.Close();
-                    this.LogError("Unable to set stop loss. Position closed");
-                }
+            } else
+            {
+                this.Position.Data.Close();
+                this.Log($"Price has already retraced. Position closed.");
+                return;
             }
+
+            this.LogError("Unable to set stop loss.");
         }
 
         private void Core_PositionAdded(Position position)
         {
-            var sp = new ShieldedPosition(position);
-            var desiredStopSide = position.Side == Side.Buy ? Side.Sell : Side.Buy;
-            sp.StopOrderId = Core.Orders
-                    .Where(order => order.Symbol.Equals(position.Symbol) && order.OrderTypeId == OrderType.Stop && order.Side == desiredStopSide)
-                    .Select(order => order.Id)
-                    .FirstOrDefault() ?? null;
-
-            if (this.WatchedPositions.Add(sp))
-            {
-                this.Log($"Added position -- ID: {sp.Id}, Side: {sp.Position.Side}, Stop: {sp.StopOrderId ?? "None"}");
-            }
+            this.Position = new WatchedPosition(position);
+            this.Log($"Added position -- ID: {this.Position.Id}, Side: {this.Position.Data.Side}");
         }
 
         private void Core_PositionRemoved(Position position)
         {
             this.Log($"Trying to remove {position.Id}");
-            var sp = this.WatchedPositions.FirstOrDefault(sp => sp.Id.Equals(position.Id)) ?? null;
-            if (sp == null) return;
-            CancelStopOrder(sp);
-            if (this.WatchedPositions.Remove(sp))
-            {
-                this.Log($"Removed position -- ID: {sp.Id}, Side: {sp.Position.Side}");
-            }
+            if (this.Position == null || !this.Position.Id.Equals(position.Id)) return;
+            CancelStopOrder(this.Position);
+            this.Position = null;
+            this.Log($"Removed position -- ID: {this.Position.Id}, Side: {this.Position.Data.Side}");
         }
 
-        private static void CancelStopOrder(ShieldedPosition sp)
+        private Order GetExistingStopOrder() => Core.Orders
+                    .Where(order => this.Position != null && order.Symbol.Equals(this.Symbol) && order.OrderTypeId == OrderType.Stop && order.Side == this.Position.StopSide)
+                    .FirstOrDefault() ?? null;
+
+        private static void CancelStopOrder(WatchedPosition position)
         {
-            if (sp.StopOrderId == null) return;
+            if (position.StopOrderId == null) return;
             try {
-                Core.CancelOrder(Core.GetOrderById(sp.StopOrderId, sp.Position.ConnectionId));
+                Core.CancelOrder(Core.GetOrderById(position.StopOrderId, position.Data.ConnectionId));
             } catch (Exception) { }
-            sp.StopOrderId = null;
+            position.StopOrderId = null;
         }
     }
 }
