@@ -108,11 +108,10 @@ namespace ShadowTS
 
             while (this.Position.NextStops.Count < this.BarLag)
             {
-                nextStop = this.Position.IsLong ? lastBar.Low : lastBar.High;
+                nextStop = this.Position.IsLong ? Math.Max(lastBar.Low, existingStopOrderPrice ?? lastBar.Low) : Math.Min(lastBar.High, existingStopOrderPrice ?? lastBar.High);
                 if (this.Position.NextStops.Count > 0)
                 {
-                    double altPrice = existingStopOrderPrice != null ? (double) existingStopOrderPrice : this.Position.NextStops.Last();
-                    nextStop = this.Position.IsLong ? Math.Max(lastBar.Low, altPrice) : Math.Min(lastBar.High, altPrice);
+                    nextStop = this.Position.IsLong ? Math.Max(lastBar.Low, this.Position.NextStops.Last()) : Math.Min(lastBar.High, this.Position.NextStops.Last());
                 }
                 this.Position.NextStops.Enqueue(nextStop);
             }
