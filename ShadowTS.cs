@@ -95,16 +95,15 @@ namespace ShadowTS
                 this.LogError("Failed to find completed bar");
                 return;
             };
-            this.Log($"New \"{this.Period}\" candle -- {lastBar}");
+            this.Log($"{this.Period} period completed: {lastBar}");
 
             if (this.Position == null) return;
             double nextStop;
-            Order existingStopOrder = null;
+            double? existingStopOrderPrice = null;
 
             if (this.Position.StopOrderId == null)
             {
-                existingStopOrder = this.GetExistingStopOrder();
-                existingStopOrder?.Cancel();
+                existingStopOrderPrice = this.GetExistingStopOrder()?.TriggerPrice;
             }
 
             while (this.Position.NextStops.Count < this.BarLag)
@@ -112,13 +111,13 @@ namespace ShadowTS
                 nextStop = this.Position.IsLong ? lastBar.Low : lastBar.High;
                 if (this.Position.NextStops.Count > 0)
                 {
-                    double altPrice = existingStopOrder != null ? existingStopOrder.TriggerPrice : this.Position.NextStops.Last();
+                    double altPrice = existingStopOrderPrice != null ? (double) existingStopOrderPrice : this.Position.NextStops.Last();
                     nextStop = this.Position.IsLong ? Math.Max(lastBar.Low, altPrice) : Math.Min(lastBar.High, altPrice);
                 }
                 this.Position.NextStops.Enqueue(nextStop);
             }
 
-            CancelStopOrder(this.Position);
+            this.CancelAllStopOrders();
 
             nextStop = this.Position.NextStops.Dequeue();
 
@@ -143,39 +142,45 @@ namespace ShadowTS
             } else
             {
                 this.Position.Data.Close();
-                this.Log($"Price has already retraced. Position closed.");
+                this.Log($"Price has already retraced. Position closed");
                 return;
             }
 
-            this.LogError("Unable to set stop loss.");
+            this.LogError("Unable to set stop loss");
         }
 
         private void Core_PositionAdded(Position position)
         {
+            this.Log($"New position detected. ID: {position.Id}");
             this.Position = new WatchedPosition(position);
-            this.Log($"Added position -- ID: {this.Position.Id}, Side: {this.Position.Data.Side}");
+            this.Log($"Now watching position: {this.Position.Id}. Side: {this.Position.Data.Side}");
         }
 
         private void Core_PositionRemoved(Position position)
         {
-            this.Log($"Trying to remove {position.Id}");
+            this.Log($"Position removal detected. ID: {position.Id}");
             if (this.Position == null || !this.Position.Id.Equals(position.Id)) return;
-            CancelStopOrder(this.Position);
+            this.CancelAllStopOrders();
+            this.Log($"Done watching position: {this.Position.Id}. Side: {this.Position.Data.Side}");
             this.Position = null;
-            this.Log($"Removed position -- ID: {this.Position.Id}, Side: {this.Position.Data.Side}");
         }
 
         private Order GetExistingStopOrder() => Core.Orders
                     .Where(order => this.Position != null && order.Symbol.Equals(this.Symbol) && order.OrderTypeId == OrderType.Stop && order.Side == this.Position.StopSide)
                     .FirstOrDefault() ?? null;
 
-        private static void CancelStopOrder(WatchedPosition position)
+        private void CancelAllStopOrders()
         {
-            if (position.StopOrderId == null) return;
             try {
-                Core.CancelOrder(Core.GetOrderById(position.StopOrderId, position.Data.ConnectionId));
+                Core.Orders
+                    .Where(order => order.Symbol.Equals(this.Symbol) && order.OrderTypeId == OrderType.Stop)
+                    .ToList()
+                    .ForEach(order => Core.CancelOrder(order));
             } catch (Exception) { }
-            position.StopOrderId = null;
+            if (this.Position != null)
+            {
+                this.Position.StopOrderId = null;
+            }
         }
     }
 }
