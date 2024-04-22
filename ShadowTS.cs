@@ -165,14 +165,14 @@ namespace ShadowTS
         }
 
         private Order GetExistingStopOrder() => Core.Orders
-                    .Where(order => this.Position != null && order.Symbol.Equals(this.Symbol) && order.OrderTypeId == OrderType.Stop && order.Side == this.Position.StopSide)
+                    .Where(order => this.Position != null && this.IsSameSymbol(order.Symbol) && order.OrderTypeId == OrderType.Stop && order.Side == this.Position.StopSide)
                     .FirstOrDefault() ?? null;
 
         private void CancelAllStopOrders()
         {
             try {
                 Core.Orders
-                    .Where(order => order.Symbol.Equals(this.Symbol) && order.OrderTypeId == OrderType.Stop)
+                    .Where(order => this.IsSameSymbol(order.Symbol) && order.OrderTypeId == OrderType.Stop)
                     .ToList()
                     .ForEach(order => Core.CancelOrder(order));
             } catch (Exception) { }
@@ -181,5 +181,7 @@ namespace ShadowTS
                 this.Position.StopOrderId = null;
             }
         }
+
+        private bool IsSameSymbol(Symbol symbol) => symbol.ToString().Contains(this.Symbol.ToString());
     }
 }

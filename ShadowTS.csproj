@@ -10,7 +10,7 @@
     <RootNamespace>ShadowTS</RootNamespace>
     <StartAction>Program</StartAction>
     <StartProgram>C:\Users\lowkey\Quantower\TradingPlatform\v1.138.15\Console.StarterNew.exe</StartProgram>
-    <StartArguments>--address 127.0.0.1 --port 61838</StartArguments>
+    <StartArguments>--address 127.0.0.1 --port 63819</StartArguments>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
     <OutputPath>C:\Users\lowkey\Quantower\TradingPlatform\v1.138.15\..\..\Settings\Scripts\Strategies\ShadowTS</OutputPath>
